@@ -1,136 +1,219 @@
+# Nom lisible du workflow dans l’interface GitHub Actions
 name: CI/CD Pipeline
 
+# --------------------------------------------------
+# Déclencheurs du workflow
+# --------------------------------------------------
 on:
+  # Déclenchement automatique lors d’un push
   push:
+    # Seulement sur les branches main et develop
     branches: [main, develop]
+
+  # Déclenchement automatique lors d’une Pull Request
   pull_request:
+    # Uniquement si la PR cible la branche main
     branches: [main]
+
+  # Déclenchement manuel depuis l’interface GitHub
   workflow_dispatch:
 
+# --------------------------------------------------
+# Variables d’environnement globales
+# --------------------------------------------------
 env:
+  # Nom de l’image Docker à construire (DockerHub)
+  # Le nom d’utilisateur est stocké dans les secrets GitHub
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/taskflow
+
+  # Version de Node.js utilisée dans toute la pipeline
   NODE_VERSION: '20'
 
+# ==================================================
+# Définition des jobs
+# ==================================================
 jobs:
+
   # ===========================================
-  # Job 1: Installation et Tests Unitaires
+  # Job 1 : Tests unitaires
+  # Objectif : valider la logique métier
   # ===========================================
   test-unit:
+    # Nom affiché dans l’UI GitHub
     name: Tests Unitaires
+
+    # Machine virtuelle utilisée pour le job
     runs-on: ubuntu-latest
     
     steps:
+      # Étape 1 : récupérer le code source du dépôt
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Étape 2 : installer Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
+          # Version définie dans les variables globales
           node-version: ${{ env.NODE_VERSION }}
+
+          # Active le cache npm pour accélérer les builds
           cache: 'npm'
 
+      # Étape 3 : installer les dépendances
+      # npm ci garantit une installation reproductible
       - name: Install dependencies
         run: npm ci
 
+      # Étape 4 : exécuter les tests unitaires
       - name: Run unit tests
         run: npm test
 
+
   # ===========================================
-  # Job 2: Tests Selenium (E2E)
+  # Job 2 : Tests Selenium (E2E)
+  # Objectif : valider l’application complète
   # ===========================================
   test-selenium:
     name: Tests Selenium
     runs-on: ubuntu-latest
     
     steps:
+      # Récupération du code source
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Installation de Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
+      # Installation des dépendances (y compris devDependencies)
       - name: Install dependencies
         run: npm ci
 
+      # Installation de Google Chrome pour Selenium
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
         with:
+          # Version stable de Chrome
           chrome-version: stable
 
+      # Exécution des tests E2E Selenium
       - name: Run Selenium tests
         run: npm run test:selenium
 
+
   # ===========================================
-  # Job 3: Build et validation
+  # Job 3 : Build et validation applicative
+  # Objectif : s’assurer que l’app est déployable
   # ===========================================
   build:
     name: Build Application
     runs-on: ubuntu-latest
+
+    # Ce job ne démarre QUE si les tests unitaires
+    # et Selenium ont réussi
     needs: [test-unit, test-selenium]
     
     steps:
+      # Récupération du code source
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Installation de Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
+      # Installation uniquement des dépendances de production
       - name: Install dependencies
         run: npm ci --only=production
 
+      # Vérification de la structure minimale de l’application
       - name: Validate application structure
         run: |
           echo "Validating application structure..."
+          # Vérifie la présence des fichiers critiques
           test -f src/app.js
           test -f public/index.html
           test -d src/routes
           test -d src/models
           echo "✅ Application structure is valid"
 
+      # Test de démarrage réel de l’application
       - name: Test application startup
         run: |
+          # Démarre l’application en arrière-plan
           node src/app.js &
+
+          # Attente pour laisser le serveur démarrer
           sleep 3
+
+          # Vérifie que l’API répond correctement
           curl -f http://localhost:3000/api/tasks || exit 1
           echo "✅ Application starts correctly"
 
+
   # ===========================================
-  # Job 4: Build et Push Docker Image
+  # Job 4 : Build et Push Docker
+  # Objectif : livraison de l’image en production
   # ===========================================
   docker:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
+
+    # Ce job dépend du build applicatif
     needs: build
+
+    # Condition :
+    # - uniquement sur un push
+    # - uniquement sur la branche main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
+      # Récupération du code source
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Activation de Docker Buildx (build multi-architecture)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Connexion sécurisée à Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Build et push de l’image Docker
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
+          # Contexte de build
           context: .
+
+          # Dockerfile utilisé
           file: ./Dockerfile
+
+          # Push activé vers Docker Hub
           push: true
+
+          # Tags de l’image :
+          # - numéro de run (traçabilité)
+          # - latest (version courante)
           tags: |
             ${{ env.DOCKER_IMAGE }}:${{ github.run_number }}
             ${{ env.DOCKER_IMAGE }}:latest
+
+          # Cache GitHub Actions pour accélérer les builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+          # Build multi-architecture
           platforms: linux/amd64,linux/arm64
